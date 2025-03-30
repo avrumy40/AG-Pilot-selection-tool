@@ -222,7 +222,7 @@ if uploaded_file is not None:
                 filtered_df = filtered_df[(filtered_df['SKU Qty'] >= min_skus) & 
                                         (filtered_df['Product Qty'] >= min_products)]
                 
-                # Apply dynamics criteria
+                # Apply dynamics criteria for surplus and lost sales
                 filtered_df = filtered_df[filtered_df['Surplus cost'] > min_surplus]
                 filtered_df = filtered_df[filtered_df['Lost sales'] > min_lost_sales]
                 
