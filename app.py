@@ -4,6 +4,14 @@ import numpy as np
 from io import StringIO
 import base64
 
+# Initialize session state variables for KPI calculation
+if 'kpi_calculated' not in st.session_state:
+    st.session_state.kpi_calculated = False
+if 'kpi_df' not in st.session_state:
+    st.session_state.kpi_df = None
+if 'filtered_results' not in st.session_state:
+    st.session_state.filtered_results = None
+
 # Set page config
 st.set_page_config(
     page_title="AG Selection Tool",
@@ -105,14 +113,73 @@ def get_csv_download_link(df, filename="filtered_results.csv"):
     href = f'<a href="data:file/csv;base64,{b64}" download="{filename}" class="download-button">Download CSV</a>'
     return href
 
+# Function to determine top 2 KPI focuses for an AG
+def determine_kpi_focuses(row):
+    # Initialize an empty list to store KPIs
+    kpis = []
+    
+    # Ensure all required fields are numeric
+    dormant_days = float(row['Dormant days'])
+    surplus_cost = float(row['Surplus cost'])
+    lost_sales = float(row['Lost sales'])
+    availability = float(row['AVG availability (%)'])
+    
+    # Add KPIs based on specific conditions with proper numeric comparisons
+    if dormant_days > 80:
+        kpis.append("Dormant Inventory (Age)")
+    if surplus_cost > 2 * lost_sales:
+        kpis.append("Inventory Reduction")
+    if availability < 75:
+        kpis.append("Availability Improvement")
+    
+    # If we have fewer than 2 KPIs, add Sales Through
+    if len(kpis) < 2:
+        kpis.append("Sales Through")
+    
+    # If we still have fewer than 2 KPIs, add another one that's not already in the list
+    if len(kpis) < 2:
+        if "Inventory Reduction" not in kpis:
+            kpis.append("Inventory Reduction")
+        elif "Availability Improvement" not in kpis:
+            kpis.append("Availability Improvement")
+    
+    # Ensure we return exactly 2 KPIs
+    return kpis[:2]
+
+# Legacy function for backward compatibility
+def determine_kpi_focus(row):
+    return determine_kpi_focuses(row)[0]
+        
+# Function to get rationale for KPI focus
+def get_kpi_rationale(kpi):
+    rationales = {
+        "Dormant Inventory (Age)": "Indicates stagnant stock nearing obsolescence",
+        "Inventory Reduction": "Surplus is the dominant problem to solve",
+        "Availability Improvement": "Chronic stockouts risk lost sales and customer experience",
+        "Sales Through": "Healthy balance → optimize sell-through further"
+    }
+    return rationales.get(kpi, "")
+
 # Function to clean numeric columns
 def clean_numeric_values(df):
-    for col in ['SUM sales', 'Surplus cost', 'Lost sales']:
+    # Ensure all common numeric columns are properly converted to numeric types
+    numeric_columns = [
+        'SUM sales', 'Surplus cost', 'Lost sales', 'SKU Qty', 'Product Qty', 
+        'AVG availability (%)', 'Dormant days', 'Total sales (£)', 'Total sales (units)', 
+        'Global STR (%)', 'Global Discount STR (%)', 'Global Full price STR (%)', 
+        'Local STR (%)', 'Local Discount STR (%)', 'Local Full Price STR (%)'
+    ]
+    
+    for col in numeric_columns:
         if col in df.columns:
-            # Remove commas and convert to float
-            df[col] = df[col].replace({',': ''}, regex=True)
-            df[col] = df[col].replace({'—': '0'}, regex=True)
+            # First convert any non-numeric characters or special characters
+            df[col] = df[col].astype(str)  # Ensure it's a string first
+            df[col] = df[col].replace({',': ''}, regex=True)  # Remove commas
+            df[col] = df[col].replace({'—': '0', '-': '0', 'N/A': '0', 'n/a': '0'}, regex=True)  # Replace dash with zero
+            
+            # Then convert to numeric, handling any errors
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+    
     return df
 
 # Main app header
@@ -120,8 +187,15 @@ st.markdown('<h1 class="main-header">AG Selection Tool</h1>', unsafe_allow_html=
 st.markdown('<p class="subheader">Find optimal assortment groups for your pilot program</p>', 
             unsafe_allow_html=True)
 
-# File uploader section
-uploaded_file = st.file_uploader("Upload AG Performance CSV", type=["csv"])
+# File uploader sections
+st.markdown("### Upload Data Files")
+col1, col2 = st.columns(2)
+
+with col1:
+    uploaded_file = st.file_uploader("Upload Performance Data CSV", type=["csv"], key="perf_data")
+
+with col2:
+    season_file = st.file_uploader("Upload Seasonal Analysis CSV (required)", type=["csv"], key="season_data")
 
 if uploaded_file is not None:
     # Read the CSV file
@@ -129,8 +203,6 @@ if uploaded_file is not None:
         df = pd.read_csv(uploaded_file)
         # Clean the data
         df = clean_numeric_values(df)
-        
-        st.success("File uploaded successfully!")
         
         # Parameters section in columns
         st.markdown("### Configure Parameters")
@@ -160,7 +232,7 @@ if uploaded_file is not None:
             "Target Availability Range (%)", 
             min_value=0, 
             max_value=100, 
-            value=(50, 90),
+            value=(50, 95),
             help="Select AGs with average availability in this range"
         )
         
@@ -170,7 +242,7 @@ if uploaded_file is not None:
             min_skus = st.number_input(
                 "Minimum SKUs", 
                 min_value=0, 
-                value=150,
+                value=10,
                 help="Minimum number of SKUs required"
             )
         
@@ -178,7 +250,7 @@ if uploaded_file is not None:
             min_products = st.number_input(
                 "Minimum Products", 
                 min_value=0, 
-                value=40,
+                value=10,
                 help="Minimum number of products required"
             )
         
@@ -188,7 +260,7 @@ if uploaded_file is not None:
             min_surplus = st.number_input(
                 "Minimum Surplus Cost", 
                 min_value=0, 
-                value=1000,
+                value=100,
                 help="Minimum surplus cost value required"
             )
         
@@ -196,12 +268,31 @@ if uploaded_file is not None:
             min_lost_sales = st.number_input(
                 "Minimum Lost Sales", 
                 min_value=0, 
-                value=1000,
+                value=100,
                 help="Minimum lost sales value required"
+            )
+            
+        # New parameters for dormant and salethrough
+        col1, col2 = st.columns(2)
+        with col1:
+            min_age = st.number_input(
+                "Minimum Average Age (days)", 
+                min_value=0, 
+                value=30,
+                help="Minimum average age in days (dormant inventory filter)"
+            )
+        
+        with col2:
+            max_salethrough = st.number_input(
+                "Maximum Salethrough Rate (%)", 
+                min_value=0, 
+                max_value=100,
+                value=80,
+                help="Maximum salethrough percentage required"
             )
         
         # Run Analysis button
-        analyze_button = st.button("Run Analysis", type="primary")
+        analyze_button = st.button("Run Analysis", type="primary", key="analyze_button")
         
         # Main content area
         if analyze_button:
@@ -225,6 +316,43 @@ if uploaded_file is not None:
                 # Apply dynamics criteria for surplus and lost sales
                 filtered_df = filtered_df[filtered_df['Surplus cost'] > min_surplus]
                 filtered_df = filtered_df[filtered_df['Lost sales'] > min_lost_sales]
+                
+                # Apply new filters for dormant (age) - now MINIMUM age
+                filtered_df = filtered_df[filtered_df['Dormant days'] >= min_age]
+                
+                # For salethrough, both files are required
+                if season_file is None:
+                    st.error("Seasonal analysis data (second CSV) is required. Please upload both CSV files.")
+                    st.stop()  # Using st.stop() instead of return
+                
+                seasonal_data_valid = True
+                
+                try:
+                    season_df = pd.read_csv(season_file)
+                    season_df = clean_numeric_values(season_df)
+                    
+                    # Merge the dataframes on AG to get the salethrough data
+                    # We're using Global STR as the salethrough metric
+                    if 'Global STR (%)' in season_df.columns:
+                        merged_df = pd.merge(filtered_df, 
+                                          season_df[['AG', 'Global STR (%)']], 
+                                          on='AG', how='inner')  # Using inner join to require matches
+                        
+                        # Apply the salethrough filter - now MAXIMUM salethrough
+                        if 'Global STR (%)' in merged_df.columns:
+                            filtered_df = merged_df[merged_df['Global STR (%)'] <= max_salethrough]
+                        else:
+                            st.error("Required column 'Global STR (%)' not found in seasonal data.")
+                            seasonal_data_valid = False
+                    else:
+                        st.error("Required column 'Global STR (%)' not found in seasonal data.")
+                        seasonal_data_valid = False
+                except Exception as e:
+                    st.error(f"Error processing seasonal data: {e}")
+                    seasonal_data_valid = False
+                    
+                if not seasonal_data_valid:
+                    st.stop()  # Stop execution if seasonal data is invalid
                 
                 # Display summary results
                 st.markdown("### Analysis Results")
@@ -265,10 +393,51 @@ if uploaded_file is not None:
                         </div>
                         """, unsafe_allow_html=True)
                     
-                    # Complete results in a table
-                    st.markdown("### Complete Results")
+                    # Calculate KPIs for each AG first
+                    kpi_df = filtered_df.copy()
+                    
+                    # Get two KPIs for each AG
+                    kpi_list = []
+                    kpi_by_ag = {}
+                    
+                    for idx, row in kpi_df.iterrows():
+                        ag_name = row['AG']
+                        kpis = determine_kpi_focuses(row)
+                        
+                        # Store the KPIs joined by comma for this AG
+                        kpi_by_ag[ag_name] = ', '.join(kpis)
+                        
+                        for kpi in kpis:
+                            kpi_list.append({
+                                'AG': ag_name,
+                                'KPI Focus': kpi,
+                                'Rationale': get_kpi_rationale(kpi)
+                            })
+                    
+                    # Convert to dataframe for KPI analysis
+                    kpi_results = pd.DataFrame(kpi_list)
+                    
+                    # Store results in session state
+                    st.session_state.kpi_df = kpi_results
+                    
+                    # Add KPI columns to the filtered results dataframe
+                    filtered_df['KPI Recommendations'] = filtered_df['AG'].map(kpi_by_ag)
+                    
+                    # Store the updated filtered dataframe in session state
+                    st.session_state.filtered_results = filtered_df.copy()
+                    
+                    # Complete results in a table with KPIs integrated
+                    st.markdown("### Complete Results with KPI Recommendations")
+                    
+                    # Reorder columns to put KPI Recommendations right after AG
+                    cols = list(filtered_df.columns)
+                    cols.remove('AG')
+                    cols.remove('KPI Recommendations')
+                    ordered_cols = ['AG', 'KPI Recommendations'] + cols
+                    
+                    # Show the reordered dataframe
                     st.dataframe(
-                        filtered_df.style.format({
+                        filtered_df[ordered_cols].style.format({
                             'SUM sales': '${:,.2f}',
                             'AVG availability (%)': '{:.2f}%',
                             'Surplus cost': '${:,.2f}',
@@ -279,6 +448,49 @@ if uploaded_file is not None:
                     
                     # Download button
                     st.markdown(get_csv_download_link(filtered_df), unsafe_allow_html=True)
+                    
+                    # Add KPI analysis section
+                    st.markdown("### KPI Analysis")
+                    
+                    # Calculate KPI counts for the bar chart
+                    kpi_counts = kpi_results['KPI Focus'].value_counts().reset_index()
+                    kpi_counts.columns = ['KPI', 'Count']
+                    
+                    # Display bar chart of KPI distribution
+                    st.markdown("#### KPI Distribution Across All AGs")
+                    
+                    # Setup the chart
+                    st.bar_chart(
+                        kpi_counts, 
+                        x='KPI',
+                        y='Count',
+                        color="#1F6C6D"
+                    )
+                    
+                    # Calculate percentages for the total pool
+                    total_kpis = len(kpi_list)
+                    
+                    st.markdown("#### KPI Impact Analysis")
+                    st.markdown("""
+                    <div class="warning-card">
+                        <h4>KPI Distribution Summary:</h4>
+                    """, unsafe_allow_html=True)
+                    
+                    for idx, row in kpi_counts.iterrows():
+                        kpi = row['KPI']
+                        count = row['Count']
+                        percentage = round((count / total_kpis) * 100, 1)
+                        rationale = get_kpi_rationale(kpi)
+                        st.markdown(f"""
+                        <p><strong>{kpi}</strong> ({percentage}% of KPIs) - {rationale}</p>
+                        """, unsafe_allow_html=True)
+                        
+                    st.markdown("</div>", unsafe_allow_html=True)
+                    
+                    # Download button
+                    st.markdown("#### Download KPI Analysis")
+                    st.markdown(get_csv_download_link(kpi_results, "kpi_recommendations.csv"), 
+                                unsafe_allow_html=True)
                     
                 else:
                     st.warning("No recommendations available with current parameters. Please adjust your filters.")
@@ -297,7 +509,7 @@ else:
         <p>This tool helps you identify optimal assortment groups (AGs) for piloting based on performance criteria.</p>
         <h3>To get started:</h3>
         <ol>
-            <li>Upload your AG performance CSV file</li>
+            <li>Upload <strong>both</strong> your AG performance CSV file and seasonal analysis CSV file (both are required)</li>
             <li>Configure the filtering parameters to match your business needs</li>
             <li>Click the "Run Analysis" button</li>
             <li>Review the recommended AGs and download results if needed</li>
@@ -315,15 +527,23 @@ else:
     # Show example of expected CSV format
     with st.expander("Expected CSV Format"):
         st.markdown("""
-        Your CSV file should have these columns:
+        ### Performance Data CSV
+        Your main performance data CSV file should have these columns:
         - `AG`: Assortment Group name/identifier
         - `SUM sales`: Total sales amount
         - `SKU Qty`: Number of SKUs in the assortment group
         - `Product Qty`: Number of distinct products
         - `AVG availability (%)`: Average product availability percentage
-        - `AVG age days`: Average age of products in days
+        - `Dormant days`: Average age of dormant inventory in days
         - `Surplus cost`: Cost of surplus inventory
         - `Lost sales`: Value of lost sales opportunities
+        
+        ### Seasonal Analysis CSV (Required)
+        The seasonal analysis CSV is required and should have these columns:
+        - `AG`: Assortment Group name/identifier (must match the AG values in the performance data)
+        - `Global STR (%)`: Global sales-through rate percentage (required)
+        - `Local STR (%)`: Local sales-through rate percentage
+        - Additional metrics like discount rates, unit sales, etc.
         """)
 
 # Footer
